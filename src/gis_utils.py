@@ -12,6 +12,8 @@ from rasterio.transform import xy
 #     # rasterio returns (x, y) = (lon, lat)
 #     return y, x
 
+
+ # отримуємо маску затоплення 0/1 враховуючи викревлення меркантора обчислюємо площу затоплення в км2
 def flood_area_km2(mask, profile, bounds):
     transform = profile["transform"]
 
