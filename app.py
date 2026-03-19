@@ -4,6 +4,7 @@ import numpy as np
 import pathlib
 import geopandas as gpd
 import matplotlib.pyplot as plt
+from matplotlib.colors import LightSource
 import seaborn as sns
 import pandas as pd
 import json
@@ -44,12 +45,21 @@ def switch_to_map():
 # =========================================================
 # НАЛАШТУВАННЯ КОЛЬОРІВ
 # =========================================================
-terrain_like = make_colorscale([
-    "#3366cc", "#66ccff",
-    "#66ff66", "#cccc66",
-    "#996633", "#ffffff"
-])
-WATER_COLOR = "#17175C"
+# Колірна шкала рельєфу: від'ємні висоти — море, далі зелено-коричнево-біла суша
+# zmin=-5, zmax=60 → значення 0 м припадає на позицію 5/65 ≈ 0.077 у шкалі
+terrain_like = [
+    [0.000, "#17175C"],  # -5 м і нижче — море (темно-синє)
+    [0.077, "#17175C"],  # 0 м — межа море/суша (ще синє)
+    [0.078, "#1a5c2a"],  # 0 м+ — низини (темно-зелений)
+    [0.20,  "#4caf50"],  # ~8 м — рівнини (зелений)
+    [0.40,  "#a5d96a"],  # ~21 м — піднесення (світло-зелений)
+    [0.60,  "#d4b483"],  # ~34 м — горбисте (бежевий)
+    [0.80,  "#996633"],  # ~47 м — підвищення (коричневий)
+    [0.92,  "#c8a96e"],  # ~55 м — гори (світло-коричневий)
+    [1.00,  "#f5f5f5"],  # 60 м+ — вершини (білий)
+]
+WATER_COLOR = "#12125B"
+LAKE_COLOR  = "#0C59AB"   # голубий для замкнених водойм (лимани, озера)
 ERROR_COLOR = "red"
 
 # =========================================================
@@ -227,10 +237,12 @@ with st.sidebar:
         """
         st.markdown(slider_css, unsafe_allow_html=True)
 
+        # ЗМІНА 2: key містить рік → при зміні року Streamlit перестворює слайдер
+        # із новим дефолтним значенням SSP2-4.5 для обраного року
         water_rise = st.slider(
             "Підняття рівня (м):",
             0.0, 5.0, round(v_m, 2), 0.01,
-            key="water_rise_slider"
+            key=f"water_rise_slider_{year}"
         )
         show_naive = st.checkbox(" Показати помилки наївної моделі", False)
         st.caption(f"Sea bias: {sea_bias:.3f} m")
@@ -272,18 +284,71 @@ if st.session_state.page == 'map':
         # ── Plotly-карта (існуюча) ──────────────────────────────────────────────
         st.subheader("Фізична карта затоплення (DEM)")
 
+   
+        z_min = float(np.nanmin(dem))   # -6.5 м
+        z_max = float(np.nanmax(dem))   # 66.0 м
+
+
         fig = px.imshow(
             dem,
             color_continuous_scale=terrain_like,
-            origin="upper", zmin=0, zmax=60, aspect="equal",
+            origin="upper", zmin=z_min, zmax=z_max, aspect="equal",
             title=f"Карта ризиків (+{water_rise:.2f} м)",
             labels=dict(x="X", y="Y", color="Висота (м)")
         )
+
+        # ── Hillshade (тіньовий рельєф) ─────────────────────────────────────
+        # Замінюємо NaN нулями лише для розрахунку тіней
+        dem_filled = np.where(np.isnan(dem), 0, dem)
+        ls = LightSource(azdeg=315, altdeg=45)
+        hillshade = ls.hillshade(dem_filled, vert_exag=4)
+        fig.add_trace(go.Heatmap(
+            z=hillshade,
+            colorscale=[[0, "black"], [1, "white"]],
+            opacity=0.25,
+            showscale=False,
+            hoverinfo='skip',
+            name="Hillshade"
+        ))
+
+        # ── Замкнені водойми (озера) — висота ≤ 0, але без сполучення з морем ──
+        # base_mask = пікселі, з'єднані з морем BFS. Якщо висота ≤ 0, але NOT
+        # base_mask — це замкнена западина (озеро, лиман), фарбуємо тим самим
+        # темно-синім, що й море (opacity=1.0 — суцільне перекриття рельєфу).
+        # Поріг -0.5 м: відсікає міський шум DEM (~0), але захоплює реальні
+        # замкнені западини (Куяльник -6.5 м тощо).
+        # Хаджибей (== 0) вже синій через terrain_like при zmin=-5.
+        landlocked_mask = ((dem <= -1) | (dem == 0)) & (~base_mask) & (~np.isnan(dem))
+        if landlocked_mask.any():
+            fig.add_trace(go.Heatmap(
+                z=np.where(landlocked_mask, 1, np.nan),
+                colorscale=[[0, LAKE_COLOR], [1, LAKE_COLOR]],
+                opacity=1.0,
+                showscale=False,
+                hoverinfo='skip',
+                name="Озера / западини"
+            ))
+
+        # ── Контурні лінії ізовисот ─────────────────────────────────────────
+        contour_step = max(1, int((z_max - max(z_min, 0)) / 12))  # ~12 ліній
+        fig.add_trace(go.Contour(
+            z=dem,
+            contours=dict(
+                start=max(0, z_min), end=z_max, size=contour_step,
+                coloring='none'
+            ),
+            line=dict(color='rgba(60, 35, 10, 0.30)', width=0.6),
+            showscale=False,
+            hoverinfo='skip',
+            name="Ізолінії"
+        ))
+
+        # ── Затоплення BFS ───────────────────────────────────────────────────
         if bfs_mask.any():
             fig.add_trace(go.Heatmap(
                 z=np.where(bfs_mask, 1, np.nan),
                 colorscale=[[0, WATER_COLOR], [1, WATER_COLOR]],
-                opacity=0.6, showscale=False,
+                opacity=0.75, showscale=False,
                 name="Затоплення (BFS)", hoverinfo='skip'
             ))
         if show_naive:
@@ -306,22 +371,8 @@ if st.session_state.page == 'map':
         # ── Folium-карта (нова) ─────────────────────────────────────────────────
         st.subheader("Інтерактивна карта затоплення ")
 
-        # if st.session_state.geojson_ready and geojson_str:
-        #     status_text = f"Відображено {geojson_count} зон затоплення • рівень +{water_rise:.2f} м"
-        # else:
-        #     status_text = " При поточному рівні зони затоплення відсутні"
-
-        # st.caption(status_text)
-
         folium_html = build_folium_map(geojson_str)
         components.html(folium_html, height=500, scrolling=False)
-
-        # Інформація про збережений файл
-        # if st.session_state.geojson_ready:
-        #     st.success(
-        #         f" GeoJSON автоматично збережено/перезаписано: `{CURRENT_GEOJSON_PATH}` "
-        #         f"({geojson_count} об'єктів)"
-        #     )
 
     with tab_export:
         st.subheader("Експорт")
