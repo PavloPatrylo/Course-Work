@@ -18,7 +18,7 @@ from scipy.interpolate import interp1d
 from rasterio.features import shapes
 from shapely.geometry import shape
 
-# === ІМПОРТ ВАШИХ МОДУЛІВ ===
+
 from src.loader import load_dem
 from src.model import FloodModel
 from src.gis_utils import flood_area_km2
@@ -248,6 +248,25 @@ with st.sidebar:
         st.caption(f"Sea bias: {sea_bias:.3f} m")
 
         st.divider()
+        st.subheader("3. Геофізичні фактори")
+
+        # Тектонічне просідання: -0.36 см/рік для Одеси (звіт "Вода близько")
+        TECTONIC_RATE_CM_PER_YEAR = 0.36  # см/рік, опускання
+        tectonic_years = year - 2000       # DEM знятий ~2000 рік (SRTM)
+        h_tectonic = (TECTONIC_RATE_CM_PER_YEAR * tectonic_years) / 100  # → метри
+
+        use_tectonic = st.checkbox(
+            f"Враховувати рух земної кори ({h_tectonic:.3f} м)",
+            value=False
+        )
+
+        surge = st.slider(
+            "Штормовий нагін (м):",
+            0.0, 2.0, 0.0, 0.01,
+            key="surge_slider"
+        )
+
+        st.divider()
         st.button(" Перейти до статистики", on_click=switch_to_stats, use_container_width=True)
 
     else:
@@ -258,7 +277,7 @@ with st.sidebar:
 # СТОРІНКА 1: КАРТА
 # =========================================================
 if st.session_state.page == 'map':
-    total_level = sea_bias + water_rise
+    total_level = sea_bias + water_rise + (h_tectonic if use_tectonic else 0.0) + surge
     bfs_mask = model.calculate_flood(total_level)
     risk_mask = bfs_mask & (~base_mask)
     area_km2 = flood_area_km2(risk_mask, profile, bounds)
