@@ -24,17 +24,10 @@ from src.model import FloodModel
 from src.gis_utils import flood_area_km2
 
 # =========================================================
-# ШЛЯХ ДО ПОТОЧНОГО GEOJSON (один файл, який перезаписується)
-# =========================================================
-CURRENT_GEOJSON_PATH = pathlib.Path("flood_current.geojson")
-
-# =========================================================
 # УПРАВЛІННЯ СТАНОМ СТОРІНОК
 # =========================================================
 if 'page' not in st.session_state:
     st.session_state.page = 'map'
-if 'geojson_ready' not in st.session_state:
-    st.session_state.geojson_ready = False
 
 def switch_to_stats():
     st.session_state.page = 'stats'
@@ -45,22 +38,21 @@ def switch_to_map():
 # =========================================================
 # НАЛАШТУВАННЯ КОЛЬОРІВ
 # =========================================================
-# Колірна шкала рельєфу: від'ємні висоти — море, далі зелено-коричнево-біла суша
-# zmin=-5, zmax=60 → значення 0 м припадає на позицію 5/65 ≈ 0.077 у шкалі
 terrain_like = [
-    [0.000, "#17175C"],  # -5 м і нижче — море (темно-синє)
-    [0.077, "#17175C"],  # 0 м — межа море/суша (ще синє)
-    [0.078, "#1a5c2a"],  # 0 м+ — низини (темно-зелений)
-    [0.20,  "#4caf50"],  # ~8 м — рівнини (зелений)
-    [0.40,  "#a5d96a"],  # ~21 м — піднесення (світло-зелений)
-    [0.60,  "#d4b483"],  # ~34 м — горбисте (бежевий)
-    [0.80,  "#996633"],  # ~47 м — підвищення (коричневий)
-    [0.92,  "#c8a96e"],  # ~55 м — гори (світло-коричневий)
-    [1.00,  "#f5f5f5"],  # 60 м+ — вершини (білий)
+    [0.000, "#17175C"],
+    [0.077, "#17175C"],
+    [0.078, "#1a5c2a"],
+    [0.20,  "#4caf50"],
+    [0.40,  "#a5d96a"],
+    [0.60,  "#d4b483"],
+    [0.80,  "#996633"],
+    [0.92,  "#c8a96e"],
+    [1.00,  "#f5f5f5"],
 ]
-WATER_COLOR = "#12125B"
-LAKE_COLOR  = "#0C59AB"   # голубий для замкнених водойм (лимани, озера)
-ERROR_COLOR = "red"
+WATER_COLOR  = "#12125B"
+LAKE_COLOR   = "#0C59AB"
+FLOOD_COLOR  = "#FF6600"   # помаранчевий — нові зони затоплення
+ERROR_COLOR  = "red"
 
 # =========================================================
 # ДАНІ IPCC AR6
@@ -68,7 +60,6 @@ ERROR_COLOR = "red"
 IPCC_CSV_PATH = pathlib.Path("ipcc_scenarios.csv")
 
 def get_ipcc_projections():
-
     if not IPCC_CSV_PATH.exists():
         st.error(f"Файл {IPCC_CSV_PATH} не знайдено. Створіть його за зразком у README.")
         st.stop()
@@ -87,7 +78,6 @@ def get_ipcc_projections():
         for name in scenario_cols
     }
 
-    # Аліаси для трьох основних сценаріїв (з fallback якщо назви інші)
     scenarios = list(interp_funcs.values())
     f_min = interp_funcs.get('SSP1-1.9', scenarios[0])
     f_mid = interp_funcs.get('SSP2-4.5', scenarios[1] if len(scenarios) > 1 else scenarios[0])
@@ -96,16 +86,16 @@ def get_ipcc_projections():
     return f_min, f_mid, f_max, anchor_years, interp_funcs
 
 
-def generate_and_save_geojson(dem, mask, model, water_level, profile):
+# =========================================================
+# GEOJSON У ПАМ'ЯТІ — без запису на диск
+# =========================================================
+def generate_geojson_in_memory(dem, mask, model, water_level, profile):
     """
-    Генерує GeoJSON із поточними даними затоплення
-    та ПЕРЕЗАПИСУЄ файл flood_current.geojson.
+    Генерує GeoJSON із поточними даними затоплення ЛИШЕ В ПАМ'ЯТІ.
+    Не пише жодних файлів на диск — немає race condition між сесіями.
     Повертає (geojson_str | None, кількість об'єктів).
     """
     if mask.sum() == 0:
-        # Зберігаємо порожній FeatureCollection
-        empty = {"type": "FeatureCollection", "features": []}
-        CURRENT_GEOJSON_PATH.write_text(json.dumps(empty))
         return None, 0
 
     depth_grid = model.calculate_depth(mask, water_level)
@@ -118,16 +108,10 @@ def generate_and_save_geojson(dem, mask, model, water_level, profile):
             })
 
     if not features:
-        empty = {"type": "FeatureCollection", "features": []}
-        CURRENT_GEOJSON_PATH.write_text(json.dumps(empty))
         return None, 0
 
     gdf = gpd.GeoDataFrame.from_features(features, crs=profile["crs"])
     geojson_str = gdf.to_json()
-
-    # Перезаписуємо файл (не створюємо новий!)
-    CURRENT_GEOJSON_PATH.write_text(geojson_str)
-
     return geojson_str, len(gdf)
 
 
@@ -146,8 +130,8 @@ def build_folium_map(geojson_str=None):
                     geojson_data,
                     name="Зони затоплення",
                     style_function=lambda x: {
-                        'fillColor': '#0000ff',
-                        'color': '#0000ff',
+                        'fillColor':  '#0000ff',
+                        'color':  '#0000ff',
                         'weight': 1,
                         'fillOpacity': 0.5,
                     },
@@ -156,8 +140,8 @@ def build_folium_map(geojson_str=None):
                         aliases=['Глибина затоплення (м):']
                     )
                 ).add_to(m)
-        except Exception:
-            pass
+        except Exception as e:
+            st.warning(f"Не вдалося відобразити шар затоплення: {e}")
 
     folium.LayerControl().add_to(m)
     return m._repr_html_()
@@ -173,7 +157,7 @@ st.set_page_config(page_title="Flood Risk Odessa", page_icon="🌊", layout="wid
 def init_system():
     path = pathlib.Path("data/raw/OSNOVA.tif")
     if not path.exists():
-        path = pathlib.Path("data/raw/Suvorov.tif")
+        path = pathlib.Path("data/raw/FULL_ODESSA.tif")
     if not path.exists():
         return None, None, None, None, None, None
 
@@ -181,7 +165,7 @@ def init_system():
     model = FloodModel(dem)
     try:
         sea_bias = model.calibrate_sea_level()
-    except:
+    except Exception:
         sea_bias = 0.0
     base_mask = model.calculate_flood(sea_bias)
     return dem, model, profile, bounds, sea_bias, base_mask
@@ -220,7 +204,6 @@ with st.sidebar:
         st.divider()
         st.subheader("2. Симуляція")
 
-        # Зелений слайдер
         slider_max = 5.0
         pct_low = (v_l / slider_max) * 100
         pct_high = (v_h / slider_max) * 100
@@ -237,8 +220,6 @@ with st.sidebar:
         """
         st.markdown(slider_css, unsafe_allow_html=True)
 
-        # ЗМІНА 2: key містить рік → при зміні року Streamlit перестворює слайдер
-        # із новим дефолтним значенням SSP2-4.5 для обраного року
         water_rise = st.slider(
             "Підняття рівня (м):",
             0.0, 5.0, round(v_m, 2), 0.01,
@@ -250,14 +231,13 @@ with st.sidebar:
         st.divider()
         st.subheader("3. Геофізичні фактори")
 
-        # Тектонічне просідання: -0.36 см/рік для Одеси (звіт "Вода близько")
-        TECTONIC_RATE_CM_PER_YEAR = 0.36  # см/рік, опускання
-        tectonic_years = year - 2000       # DEM знятий ~2000 рік (SRTM)
-        h_tectonic = (TECTONIC_RATE_CM_PER_YEAR * tectonic_years) / 100  # → метри
+        TECTONIC_RATE_CM_PER_YEAR = 0.36
+        tectonic_years = year - 2000
+        h_tectonic = (TECTONIC_RATE_CM_PER_YEAR * tectonic_years) / 100
 
         use_tectonic = st.checkbox(
             f"Враховувати рух земної кори ({h_tectonic:.3f} м)",
-            value=False
+            value=True
         )
 
         surge = st.slider(
@@ -277,17 +257,24 @@ with st.sidebar:
 # СТОРІНКА 1: КАРТА
 # =========================================================
 if st.session_state.page == 'map':
+    # 1. ОБЧИСЛЕННЯ РІВНЯ ВОДИ ТА МОДЕЛЮВАННЯ ЗАТОПЛЕННЯ
+
     total_level = sea_bias + water_rise + (h_tectonic if use_tectonic else 0.0) + surge
+    
     bfs_mask = model.calculate_flood(total_level)
+    
+    # Відфільтровуємо території, які вже є водою (base_mask), щоб отримати лише НОВІ зони ризику.
     risk_mask = bfs_mask & (~base_mask)
+    
+    # Розрахунок аналітичних метрик для дашборду
     area_km2 = flood_area_km2(risk_mask, profile, bounds)
     pixels_count = int(np.count_nonzero(risk_mask))
 
-    # --- Автоматично генеруємо/перезаписуємо GeoJSON при кожній зміні повзунка ---
-    geojson_str, geojson_count = generate_and_save_geojson(
+    # 2. ОПТИМІЗАЦІЯ РОБОТИ З ДАНИМИ (БАГАТОКОРИСТУВАЦЬКИЙ РЕЖИМ)
+    # --- GeoJSON генерується в пам'яті для поточної сесії ---
+    geojson_str, geojson_count = generate_geojson_in_memory(
         dem, risk_mask, model, total_level, profile
     )
-    st.session_state.geojson_ready = geojson_str is not None
 
     st.title("Аналіз ризиків затоплення: Одеса")
 
@@ -297,17 +284,17 @@ if st.session_state.page == 'map':
     c3.metric("Затоплені пікселі", f"{pixels_count:,}")
     c4.metric("Статус", "Наївна модель" if show_naive else "BFS Модель")
 
+    # Розділення контенту на логічні вкладки для зручності
     tab_map, tab_export = st.tabs([" Карта Затоплення", " Експорт"])
 
     with tab_map:
-        # ── Plotly-карта (існуюча) ──────────────────────────────────────────────
         st.subheader("Фізична карта затоплення (DEM)")
 
-   
-        z_min = float(np.nanmin(dem))   # -6.5 м
-        z_max = float(np.nanmax(dem))   # 66.0 м
+        # Визначення діапазону висот для коректного відображення кольорів рельєфу
+        z_min = float(np.nanmin(dem))
+        z_max = float(np.nanmax(dem))
 
-
+        # 4. РЕНДЕРИНГ БАЗОВОЇ КАРТИ РЕЛЬЄФУ (Plotly)
         fig = px.imshow(
             dem,
             color_continuous_scale=terrain_like,
@@ -316,99 +303,89 @@ if st.session_state.page == 'map':
             labels=dict(x="X", y="Y", color="Висота (м)")
         )
 
-        # ── Hillshade (тіньовий рельєф) ─────────────────────────────────────
-        # Замінюємо NaN нулями лише для розрахунку тіней
+        # Додавання ефекту 3D-тіней (Hillshade) для кращого візуального сприйняття рельєфу
         dem_filled = np.where(np.isnan(dem), 0, dem)
         ls = LightSource(azdeg=315, altdeg=45)
         hillshade = ls.hillshade(dem_filled, vert_exag=4)
         fig.add_trace(go.Heatmap(
             z=hillshade,
             colorscale=[[0, "black"], [1, "white"]],
-            opacity=0.25,
-            showscale=False,
-            hoverinfo='skip',
-            name="Hillshade"
+            opacity=0.25, showscale=False, hoverinfo='skip', name="Hillshade"
         ))
 
-        # ── Замкнені водойми (озера) — висота ≤ 0, але без сполучення з морем ──
-        # base_mask = пікселі, з'єднані з морем BFS. Якщо висота ≤ 0, але NOT
-        # base_mask — це замкнена западина (озеро, лиман), фарбуємо тим самим
-        # темно-синім, що й море (opacity=1.0 — суцільне перекриття рельєфу).
-        # Поріг -0.5 м: відсікає міський шум DEM (~0), але захоплює реальні
-        # замкнені западини (Куяльник -6.5 м тощо).
-        # Хаджибей (== 0) вже синій через terrain_like при zmin=-5.
+        # Відображення існуючих внутрішніх водойм та низин (озера/западини)
         landlocked_mask = ((dem <= -1) | (dem == 0)) & (~base_mask) & (~np.isnan(dem))
         if landlocked_mask.any():
             fig.add_trace(go.Heatmap(
                 z=np.where(landlocked_mask, 1, np.nan),
                 colorscale=[[0, LAKE_COLOR], [1, LAKE_COLOR]],
-                opacity=1.0,
-                showscale=False,
-                hoverinfo='skip',
-                name="Озера / западини"
+                opacity=1.0, showscale=False, hoverinfo='skip', name="Озера / западини"
             ))
 
-        # ── Контурні лінії ізовисот ─────────────────────────────────────────
-        contour_step = max(1, int((z_max - max(z_min, 0)) / 12))  # ~12 ліній
+        # Додавання топографічних ізоліній для оцінки крутизни схилів
+        contour_step = max(1, int((z_max - max(z_min, 0)) / 12))
         fig.add_trace(go.Contour(
             z=dem,
-            contours=dict(
-                start=max(0, z_min), end=z_max, size=contour_step,
-                coloring='none'
-            ),
+            contours=dict(start=max(0, z_min), end=z_max, size=contour_step, coloring='none'),
             line=dict(color='rgba(60, 35, 10, 0.30)', width=0.6),
-            showscale=False,
-            hoverinfo='skip',
-            name="Ізолінії"
+            showscale=False, hoverinfo='skip', name="Ізолінії"
         ))
 
-        # ── Затоплення BFS ───────────────────────────────────────────────────
-        if bfs_mask.any():
+        # 5. НАКЛАДАННЯ РЕЗУЛЬТАТІВ МОДЕЛЮВАННЯ ЗАТОПЛЕННЯ
+
+        # Базові водойми (вже існували до симуляції) — темно-синім
+        if base_mask.any():
             fig.add_trace(go.Heatmap(
-                z=np.where(bfs_mask, 1, np.nan),
+                z=np.where(base_mask, 1, np.nan),
                 colorscale=[[0, WATER_COLOR], [1, WATER_COLOR]],
-                opacity=0.75, showscale=False,
-                name="Затоплення (BFS)", hoverinfo='skip'
+                opacity=0.75, showscale=False, name="Базові водойми", hoverinfo='skip'
             ))
+
+        # Нові зони затоплення (risk_mask = bfs_mask & ~base_mask) — помаранчевим
+        if risk_mask.any():
+            fig.add_trace(go.Heatmap(
+                z=np.where(risk_mask, 1, np.nan),
+                colorscale=[[0, FLOOD_COLOR], [1, FLOOD_COLOR]],
+                opacity=0.80, showscale=False, name="Нові зони затоплення", hoverinfo='skip'
+            ))
+
+        # Режим порівняння (дебагу): показує зони, які "наївна" модель (просто по висоті) 
+        # затопила б помилково, ігноруючи рельєфні перешкоди (напр. дамби)
         if show_naive:
             naive_mask = model.simple_threshold(total_level)
-            fps = naive_mask & (~bfs_mask)
+            fps = naive_mask & (~bfs_mask) # False Positives
             if fps.sum() > 0:
                 fig.add_trace(go.Heatmap(
                     z=np.where(fps, 1, np.nan),
                     colorscale=[[0, ERROR_COLOR], [1, ERROR_COLOR]],
                     opacity=0.9, showscale=False
                 ))
+                
         fig.update_layout(
-            dragmode="pan",
-            margin=dict(l=0, r=0, t=40, b=0),
-            height=650,
-            coloraxis_showscale=False
+            dragmode="pan", margin=dict(l=0, r=0, t=40, b=0),
+            height=650, coloraxis_showscale=False
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # ── Folium-карта (нова) ─────────────────────────────────────────────────
+        # 6. ІНТЕРАКТИВНА КАРТА FOLIUM
+        # Інтеграція звичайної веб-карти (OSM/Google Maps стилю) поверх згенерованих полігонів
         st.subheader("Інтерактивна карта затоплення ")
-
         folium_html = build_folium_map(geojson_str)
         components.html(folium_html, height=500, scrolling=False)
 
+    # 7. ФУНКЦІОНАЛ ЕКСПОРТУ ДАНИХ
     with tab_export:
         st.subheader("Експорт")
-        if risk_mask.sum() > 0:
-            # Завантаження поточного GeoJSON (вже згенерованого)
-            if CURRENT_GEOJSON_PATH.exists():
-                geojson_export = CURRENT_GEOJSON_PATH.read_text()
-                st.download_button(
-                    "⬇ Завантажити поточний GeoJSON",
-                    geojson_export,
-                    f"flood_{water_rise:.2f}m.geojson",
-                    "application/geo+json"
-                )
-                st.info(
-                    f"Файл містить дані для рівня **+{water_rise:.2f} м**. "
-                    "При наступному русі повзунка файл буде перезаписано."
-                )
+        if risk_mask.sum() > 0 and geojson_str:
+            # Передаємо рядок з пам'яті напряму — без читання файлу з диску.
+            # Це дозволяє швидко завантажити результати моделювання у ГІС-системи (QGIS, ArcGIS).
+            st.download_button(
+                "⬇ Завантажити поточний GeoJSON",
+                geojson_str,
+                f"flood_{water_rise:.2f}m.geojson",
+                "application/geo+json"
+            )
+            st.info(f"Файл містить дані для рівня **+{water_rise:.2f} м**.")
         else:
             st.info("Немає зон затоплення.")
 
@@ -418,7 +395,6 @@ if st.session_state.page == 'map':
 elif st.session_state.page == 'stats':
     st.title("Аналітичний звіт")
 
-    # --- 1. ПОКАЗНИКИ РАСТРУ ---
     st.header("1. Показники растру (DEM)")
     with st.container():
         col1, col2, col3 = st.columns(3)
@@ -442,7 +418,6 @@ elif st.session_state.page == 'stats':
         col3.metric("Заповненість даними", f"{valid_px/total_px*100:.1f}%")
     st.divider()
 
-    # --- 2. ПОКАЗНИКИ РЕЛЬЄФУ ---
     st.header("2. Показники рельєфу")
     with st.container():
         min_elev = np.nanmin(dem)
@@ -467,10 +442,8 @@ elif st.session_state.page == 'stats':
         st.plotly_chart(fig_hist, use_container_width=True)
     st.divider()
 
-    # --- 3. ТАБЛИЦЯ IPCC ---
     st.header("3. Сценарії IPCC AR6 (Дані)")
     with st.expander("Розгорнути таблицю значень", expanded=False):
-        # Генеруємо таблицю з функцій — без дублювання даних
         display_years = list(range(2020, 2151, 10))
         df_ipcc = pd.DataFrame({"Рік": display_years})
         for name, fn in interp_funcs.items():
@@ -481,12 +454,10 @@ elif st.session_state.page == 'stats':
         )
     st.divider()
 
-    # --- 4. ГРАФІК ДИНАМІКИ ---
     st.header("4. Динаміка підняття рівня моря")
     x_smooth = np.linspace(min(ipcc_years), max(ipcc_years), 300)
     fig_ipcc = go.Figure()
 
-    # Коридор невизначеності між SSP1-1.9 і SSP5-8.5
     fig_ipcc.add_trace(go.Scatter(
         x=x_smooth, y=np.maximum(0, interp_funcs['SSP5-8.5'](x_smooth)),
         mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'
@@ -512,7 +483,11 @@ elif st.session_state.page == 'stats':
     for name, fn in interp_funcs.items():
         fig_ipcc.add_trace(go.Scatter(
             x=x_smooth, y=np.maximum(0, fn(x_smooth)), mode='lines',
-            line=dict(color=colors[name], width=3, dash=dashes[name]),
+            line=dict(
+                color=colors.get(name, '#333333'),
+                width=3,
+                dash=dashes.get(name, 'solid')
+            ),
             name=name
         ))
 
@@ -523,7 +498,6 @@ elif st.session_state.page == 'stats':
     st.plotly_chart(fig_ipcc, use_container_width=True)
     st.divider()
 
-    # --- 5. ПОРІВНЯННЯ ВПЛИВУ ---
     st.header("5. Порівняння площі затоплення")
     st.write("Аналіз втрати території для різних сценаріїв.")
 
