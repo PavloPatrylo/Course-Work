@@ -1,6 +1,9 @@
 """GIS helper utilities."""
+import geopandas as gpd
 import numpy as np
+from rasterio.features import shapes
 from rasterio.transform import xy
+from shapely.geometry import shape
 
 
 # def rc_to_lonlat(profile: dict, row: int, col: int):
@@ -26,32 +29,28 @@ def flood_area_km2(mask, profile, bounds):
     area_m2 = mask.sum() * px_w * px_h
     return area_m2 / 1e6
 
-# def flood_area_km2(mask, profile):
-#     transform = profile["transform"]
-#     px_w = transform.a
-#     px_h = -transform.e
-#     return mask.sum() * px_w * px_h / 1e6
 
-# import numpy as np
-# from rasterio.transform import xy
+def generate_geojson_in_memory(dem, mask, model, water_level, profile):
+    """
+    Генерує GeoJSON із поточними даними затоплення ЛИШЕ В ПАМ'ЯТІ.
+    Не пише жодних файлів на диск — немає race condition між сесіями.
+    Повертає (geojson_str | None, кількість об'єктів).
+    """
+    if mask.sum() == 0:
+        return None, 0
 
-# def flood_area_km2(mask, profile):
-#     t = profile["transform"]
-#     h, w = mask.shape
+    depth_grid = model.calculate_depth(mask, water_level)
+    features = []
+    for geom, value in shapes(depth_grid, mask=mask, transform=profile["transform"]):
+        if not np.isnan(value):
+            features.append({
+                "geometry": shape(geom),
+                "properties": {"depth_m": round(float(value), 2)}
+            })
 
-#     m_per_deg_lat = 111_320.0
+    if not features:
+        return None, 0
 
-#     # широти центрів рядків
-#     # rasterio.transform.xy повертає (x, y)=(lon, lat)
-#     rows = np.arange(h)
-#     _, lats = xy(t, rows, np.zeros(h, dtype=int), offset="center")
-#     lats = np.asarray(lats)
-
-#     m_per_deg_lon = 111_320.0 * np.cos(np.deg2rad(lats))
-
-#     px_w_m_per_row = abs(t.a) * m_per_deg_lon   # (h,)
-#     px_h_m = abs(t.e) * m_per_deg_lat           # константа
-
-#     flooded_per_row = mask.sum(axis=1).astype(float)  # (h,)
-#     area_m2 = np.sum(flooded_per_row * px_w_m_per_row * px_h_m)
-#     return area_m2 / 1e6
+    gdf = gpd.GeoDataFrame.from_features(features, crs=profile["crs"])
+    geojson_str = gdf.to_json()
+    return geojson_str, len(gdf)
